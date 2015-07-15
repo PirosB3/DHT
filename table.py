@@ -7,14 +7,20 @@ from node import Node, random_20bits
 
 
 class RoutingTable(object):
-    def __init__(self, node):
+    def __init__(self, node, bootstrap=None):
         self.node = node
         self.buckets = [deque() for _ in xrange(20 * 8)]
+        if bootstrap:
+            self.update(bootstrap)
 
     def update(self, node):
         bucket_n = (self.node ^ node).distance_key()
         if node not in self.buckets[bucket_n]:
             self.buckets[bucket_n].append(node)
+
+    def find_closest(self, target_node, n=20):
+        starting_bucket_idx = (self.node ^ target_node).distance_key()
+        return self._find_closest_bucket(starting_bucket_idx, target_node, n)
 
     def _find_closest_bucket(self, starting_bucket_idx, target_node, n=20):
         shift = 0
@@ -23,6 +29,7 @@ class RoutingTable(object):
         while finished_left == False or finished_right == False:
             if len(result) >= n:
                 break
+
             # Handle left
             left_idx = starting_bucket_idx - shift
             finished_left = left_idx < 0
@@ -32,6 +39,7 @@ class RoutingTable(object):
                     for n in self.buckets[left_idx]
                 ])
 
+            # Handle right
             right_idx = starting_bucket_idx + shift
             finished_right = right_idx >= len(self.buckets)
             if not finished_right and shift > 0:
@@ -41,7 +49,7 @@ class RoutingTable(object):
                 ])
             shift += 1
         
-        return sorted(result)
+        return sorted(result)[:20]
 
 
 class TableTestCase(unittest.TestCase):
