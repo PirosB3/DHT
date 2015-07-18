@@ -29,16 +29,15 @@ class DHT(object):
     def started(self):
         return self._thread_uid != None
 
-    def get_value_handler(self, key, sock):
+    def get_value_handler(self, data_key, key, sock):
         try:
             sock.send(json.dumps({
                 'result': 'OK',
-                'value': self.data[key]
+                'value': self.data[data_key]
             }))
         except KeyError:
-            sock.send(json.dumps({
-                'result': 'NO',
-            }))
+            print "GET_VALUE for %s failed. Trying nearest" % data_key
+            self.find_node_handler(key, sock)
 
     def store_value_handler(self, key, value, sock):
         self.data[key] = value
@@ -51,7 +50,9 @@ class DHT(object):
         response = []
         for _, node in self.routing_table.find_closest(Node(key)):
             response.append((tuple(node.data), node.host, node.port))
-        sock.send(json.dumps(response))
+        sock.send(json.dumps({
+            'nodes': response
+        }))
 
     def send_message_to_node(self, node, message_type, message_value=None):
         try:
@@ -71,7 +72,9 @@ class DHT(object):
         }))
         return json.loads(socket.recv())
 
-    def iterative_find_node(self, key):
+    def iterative_find_node(self, key, data_key=None):
+        command = 'GET_VALUE' if data_key else 'FIND_NODE'
+
         # Build a set of seen items and a shortlist that
         # will be incremented
         seen = set()
@@ -96,7 +99,16 @@ class DHT(object):
 
             for _, node in alpha_contacts:
                 seen.add(node)
-                new_nodes = self.send_message_to_node(node, 'FIND_NODE', tuple(key.data))
+                if data_key:
+                    result = self.send_message_to_node(node, 'GET_VALUE', {
+                        'data_key': data_key,
+                        'key': tuple(key.data)
+                    })
+                    if 'value' in result:
+                        return result['value'], []
+                    new_nodes = result['nodes']
+                else:
+                    new_nodes = self.send_message_to_node(node, 'FIND_NODE', tuple(key.data))['nodes']
                 for data, host, port in new_nodes:
 
                     new_node = Node(bytearray(data), host, port)
@@ -107,7 +119,7 @@ class DHT(object):
                     self.routing_table.update(new_node)
                     shortlist.append(((key ^ new_node).distance_key(), new_node))
 
-        return [node for _, node in sorted(shortlist)][:20]
+        return None, [node for _, node in sorted(shortlist)][:20]
 
 
     def run(self):
@@ -137,17 +149,10 @@ class DHT(object):
             return self.data[tuple(hashed_key)]
         except KeyError:
             search_node = Node(hashed_key)
-            result = self.routing_table.find_closest(search_node)
-            if len(result) == 0:
-                raise KeyError()
-            for idx, (_, node) in enumerate(result):
-                result = self.send_message_to_node(node, 'GET_VALUE', {
-                    'key': key,
-                })
-                if 'value' in result:
-                    return result['value']
+            found, _ = self.iterative_find_node(search_node, key)
+            if found:
+                return found
             raise KeyError()
-
 
     def _run(self):
         socket = self.context.socket(zmq.REP)
@@ -162,7 +167,6 @@ class DHT(object):
                 continue
 
             message = json.loads(socket.recv())
-            #print message
 
             # Update routing table if message is from a new
             # sender
@@ -183,6 +187,7 @@ class DHT(object):
                 )
             elif message['type'] == 'GET_VALUE':
                 self.get_value_handler(
+                    message['value']['data_key'],
                     message['value']['key'],
                     socket
                 )
