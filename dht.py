@@ -1,3 +1,4 @@
+import re
 import random
 import sys
 import json
@@ -5,12 +6,18 @@ import zmq
 from itertools import count
 
 import threading
-from node import Node, random_20bits
+from node import Node, random_32bytes
 from table import RoutingTable
+
+import hashlib
+
+def distributed_hash(key):
+    return bytearray(hashlib.md5(key).hexdigest())
 
 
 class DHT(object):
     def __init__(self, node, bootstrap=None):
+        self.data = {}
         self.bootstrap = bootstrap
         self.node = node
         self.routing_table = RoutingTable(node, bootstrap)
@@ -21,6 +28,24 @@ class DHT(object):
     @property
     def started(self):
         return self._thread_uid != None
+
+    def get_value_handler(self, key, sock):
+        try:
+            sock.send(json.dumps({
+                'result': 'OK',
+                'value': self.data[key]
+            }))
+        except KeyError:
+            sock.send(json.dumps({
+                'result': 'NO',
+            }))
+
+    def store_value_handler(self, key, value, sock):
+        self.data[key] = value
+        print "Stored '%s' on %s" % (key, self.node)
+        sock.send(json.dumps({
+            'result': 'OK'
+        }))
 
     def find_node_handler(self, key, sock):
         response = []
@@ -47,26 +72,43 @@ class DHT(object):
         return json.loads(socket.recv())
 
     def iterative_find_node(self, key):
+        # Build a set of seen items and a shortlist that
+        # will be incremented
         seen = set()
-        while True:
-            closest_nodes = self.routing_table.find_closest(self.node)
-            processed = set()
-            for _, node in closest_nodes:
-                node_key = tuple(node.data)
-                if node_key not in seen:
-                    new_nodes = self.send_message_to_node(node, 'FIND_NODE', tuple(key.data))
-                    for data, host, port in new_nodes:
-                        new_node = Node(bytearray(data), host, port)
-                        if new_node != self.node:
-                            print "Discovered %s" % new_node
-                            processed.add(tuple(new_node.data))
-                            self.routing_table.update(new_node)
-                    seen.add(node_key)
+        shortlist = self.routing_table.find_closest(key)
+        best_score_so_far = float('inf')
+        while len(shortlist) > 0 and len(shortlist) <= 20:
 
-            if len(seen) >= 20 or len(processed) == 0:
-                print "BREAKING"
+            # For each iteration, pick alpha contacts: a set
+            # of K contacts that have not been seen
+            alpha_contacts = [
+                (score, node) for score, node in sorted(shortlist)
+                if node not in seen
+            ][:20]
+            if len(alpha_contacts) == 0:
                 break
-        print "FINISHED ITERATIVE FIND NODE FOR %s" % self.node
+
+            # Ensure that we are always improving our score over time
+            best_score_currently = alpha_contacts[0][0]
+            if best_score_currently >= best_score_so_far:
+                break
+            best_score_so_far = best_score_currently
+
+            for _, node in alpha_contacts:
+                seen.add(node)
+                new_nodes = self.send_message_to_node(node, 'FIND_NODE', tuple(key.data))
+                for data, host, port in new_nodes:
+
+                    new_node = Node(bytearray(data), host, port)
+                    if new_node == self.node:
+                        continue
+
+                    # Update routing table and shortlist.
+                    self.routing_table.update(new_node)
+                    shortlist.append(((key ^ new_node).distance_key(), new_node))
+
+        return [node for _, node in sorted(shortlist)][:20]
+
 
     def run(self):
         self._thread_uid = threading.Thread(target=self._run)
@@ -75,6 +117,37 @@ class DHT(object):
         if self.bootstrap:
             self.iterative_find_node(self.node)
         return self._thread_uid
+
+    def __setitem__(self, key, value):
+        hashed_key = distributed_hash(key)
+        search_node = Node(hashed_key)
+        result = self.routing_table.find_closest(search_node)
+        if len(result) == 0:
+            self.data[key] = value
+        else:
+            for _, node in result:
+                self.send_message_to_node(node, 'STORE_VALUE', {
+                    'key': key,
+                    'value': value
+                })
+
+    def __getitem__(self, key):
+        hashed_key = distributed_hash(key)
+        try:
+            return self.data[tuple(hashed_key)]
+        except KeyError:
+            search_node = Node(hashed_key)
+            result = self.routing_table.find_closest(search_node)
+            if len(result) == 0:
+                raise KeyError()
+            for idx, (_, node) in enumerate(result):
+                result = self.send_message_to_node(node, 'GET_VALUE', {
+                    'key': key,
+                })
+                if 'value' in result:
+                    return result['value']
+            raise KeyError()
+
 
     def _run(self):
         socket = self.context.socket(zmq.REP)
@@ -85,10 +158,11 @@ class DHT(object):
             found = poller.poll(2000)
             if len(found) == 0:
                 nodes_known = [len(b) for b in self.routing_table.buckets]
-                print "%s knows %s peers" % (self.node, sum(nodes_known))
+                #print "%s knows %s peers" % (self.node, sum(nodes_known))
                 continue
 
             message = json.loads(socket.recv())
+            #print message
 
             # Update routing table if message is from a new
             # sender
@@ -101,7 +175,17 @@ class DHT(object):
             self.routing_table.update(req_node)
             if message['type'] == 'FIND_NODE':
                 self.find_node_handler(message['value'], socket)
-                #print self.routing_table.buckets
+            elif message['type'] == 'STORE_VALUE':
+                self.store_value_handler(
+                    message['value']['key'],
+                    message['value']['value'],
+                    socket
+                )
+            elif message['type'] == 'GET_VALUE':
+                self.get_value_handler(
+                    message['value']['key'],
+                    socket
+                )
 
 
 def run(uid, port, boot, boot_port):
@@ -113,7 +197,7 @@ def run(uid, port, boot, boot_port):
     dht.run()
 
 def slave(uid):
-    node = Node(random_20bits(), port=3001)
+    node = Node(random_32bytes(), port=3001)
     bootstrap = Node(bytearray(uid), port=3000)
     dht = DHT(node, bootstrap)
     dht.run()
@@ -130,12 +214,22 @@ if __name__ == '__main__':
         except IndexError:
             seed = None
 
-        node = Node(random_20bits(), port=next(ports))
+        node = Node(random_32bytes(), port=next(ports))
         dht = DHT(node, seed)
         kads.append(dht)
 
-        #from time import sleep
-        #sleep(0.1)
         processes.append(dht.run())
+
+    from time import sleep
+    with open('lipsum.txt') as f:
+        result = re.findall("[A-Z]{2,}(?![a-z])|[A-Z][a-z]+(?=[A-Z])|[\'\w\-]+", f.read())
+        sleep(1)
+        for idx in xrange(1, len(result)):
+            first, second = result[idx-1], result[idx]
+            random.choice(kads)[first] = second
+        sleep(1)
+        for idx in xrange(1, len(result)):
+            first, second = result[idx-1], result[idx]
+            print "%s -> %s" % (first, random.choice(kads)[first])
 
     [p.join() for p in processes]

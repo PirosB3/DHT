@@ -3,13 +3,13 @@ import random
 import unittest
 from collections import deque
 
-from node import Node, random_20bits
+from node import Node, random_32bytes
 
 
 class RoutingTable(object):
     def __init__(self, node, bootstrap=None):
         self.node = node
-        self.buckets = [deque() for _ in xrange(20 * 8)]
+        self.buckets = [deque() for _ in xrange(32 * 8)]
         if bootstrap:
             self.update(bootstrap)
 
