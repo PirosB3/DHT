@@ -54,27 +54,27 @@ class RoutingTable(object):
 
 class TableTestCase(unittest.TestCase):
     def setUp(self):
-        self.node = Node(bytearray(['a'] * 20))
+        self.node = Node(bytearray(['a'] * 32))
 
     def test_table_exists(self):
         table = RoutingTable(self.node)
         self.assertTrue(table)
-        self.assertEqual(len(table.buckets), 20 * 8)
+        self.assertEqual(len(table.buckets), 32 * 8)
 
     def test_update_node(self):
         table = RoutingTable(self.node)
-        table.update(Node(bytearray(['b'] * 20)))
+        table.update(Node(bytearray(['b'] * 32)))
         self.assertEqual(len(table.buckets[6]), 1)
 
     def test_find_closest(self):
-        nodes = [Node(random_20bits()) for _ in xrange(6)]
+        nodes = [Node(random_32bytes()) for _ in xrange(6)]
         table = RoutingTable(self.node)
         table.buckets[4] = nodes[:2]
         table.buckets[3] = [nodes[2]]
         table.buckets[5] = nodes[3:5]
         table.buckets[10] = [nodes[5]]
 
-        search_node = Node(random_20bits())
+        search_node = Node(random_32bytes())
         result = table._find_closest_bucket(4, search_node)
         self.assertEqual(result, sorted([
             ((search_node ^ n).distance_key(), n) for n in nodes
