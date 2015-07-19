@@ -17,6 +17,11 @@ ports = count(3000)
 app = Flask(__name__)
 kads = []
 
+
+class SocketTimedOutError(Exception):
+    pass
+
+
 def distributed_hash(key):
     return bytearray(hashlib.md5(key).hexdigest())
 
@@ -29,6 +34,11 @@ class DHT(object):
         self.routing_table = RoutingTable(node, bootstrap)
         self.context = context if context != None else zmq.Context()
         self._thread_uid = None
+        self._shutdown_flag = threading.Event()
+
+    def shutdown(self):
+        self._shutdown_flag.set()
+        self._thread_uid.join()
 
     def get_value_handler(self, data_key, key, sock):
         try:
@@ -67,6 +77,12 @@ class DHT(object):
             'type': message_type,
             'value': message_value
         }))
+
+        poller = zmq.Poller()
+        poller.register(socket, zmq.POLLIN)
+        if len(poller.poll(1000)) == 0:
+            raise SocketTimedOutError()
+        
         return json.loads(socket.recv())
 
     def iterative_find_node(self, key, data_key=None):
@@ -75,6 +91,7 @@ class DHT(object):
         # Build a set of seen items and a shortlist that
         # will be incremented
         seen = set()
+        timed_out = set()
         shortlist = self.routing_table.find_closest(key)
         best_score_so_far = float('inf')
         while len(shortlist) > 0 and len(shortlist) <= 20:
@@ -96,16 +113,22 @@ class DHT(object):
 
             for _, node in alpha_contacts:
                 seen.add(node)
-                if data_key:
-                    result = self.send_message_to_node(node, 'GET_VALUE', {
-                        'data_key': data_key,
-                        'key': tuple(key.data)
-                    })
-                    if 'value' in result:
-                        return result['value'], []
-                    new_nodes = result['nodes']
-                else:
-                    new_nodes = self.send_message_to_node(node, 'FIND_NODE', tuple(key.data))['nodes']
+                new_nodes = []
+                try:
+                    if data_key:
+                        result = self.send_message_to_node(node, 'GET_VALUE', {
+                            'data_key': data_key,
+                            'key': tuple(key.data)
+                        })
+                        if 'value' in result:
+                            return result['value'], []
+                        new_nodes = result['nodes']
+                    else:
+                        new_nodes = self.send_message_to_node(node, 'FIND_NODE', tuple(key.data))['nodes']
+                except SocketTimedOutError:
+                    print "%s timed out. Removed from shortlist" % node
+                    timed_out.add(node)
+                    self.routing_table.mark_as_unavailable(node)
 
                 for data, host, port in new_nodes:
                     new_node = Node(bytearray(data), host, port)
@@ -116,7 +139,11 @@ class DHT(object):
                     self.routing_table.update(new_node)
                     shortlist.append(((key ^ new_node).distance_key(), new_node))
 
-        return None, [node for _, node in sorted(shortlist)][:20]
+        result = [
+            node for _, node in sorted(shortlist)
+            if node not in timed_out
+        ][:20]
+        return None, result
 
 
     def run(self):
@@ -156,7 +183,7 @@ class DHT(object):
         socket.bind("tcp://*:%s" % self.node.port)
         poller = zmq.Poller()
         poller.register(socket, zmq.POLLIN)
-        while True:
+        while not self._shutdown_flag.is_set():
             found = poller.poll(2000)
             if len(found) == 0:
                 nodes_known = [len(b) for b in self.routing_table.buckets]
@@ -219,6 +246,13 @@ def get_key(id, key):
 def set_key(id, key, value):
     kads[id][key] = value
     return 200, ""
+
+@app.route('/kill/<int:n>')
+def kill(n):
+    for k in kads[n:]:
+        k.shutdown()
+
+    del kads[n:]
 
 @app.route('/create')
 def create():

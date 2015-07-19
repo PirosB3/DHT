@@ -1,13 +1,16 @@
 import itertools
 import random
 import unittest
-from collections import deque
+from collections import deque, Counter
 
 from node import Node, random_32bytes
 
 
 class RoutingTable(object):
+    N_RETRIES = 3
+
     def __init__(self, node, bootstrap=None):
+        self._unavailabilities = Counter()
         self.node = node
         self.buckets = [deque() for _ in xrange(32 * 8)]
         if bootstrap:
@@ -21,6 +24,21 @@ class RoutingTable(object):
     def find_closest(self, target_node, n=20):
         starting_bucket_idx = (self.node ^ target_node).distance_key()
         return self._find_closest_bucket(starting_bucket_idx, target_node, n)
+
+    def mark_as_unavailable(self, node):
+        print self._unavailabilities
+        self._unavailabilities[node] += 1
+        if self._unavailabilities[node] >= self.N_RETRIES:
+            target_bucket_idx = (node ^ self.node).distance_key()
+            try:
+                self.buckets[target_bucket_idx].remove(node)
+                del self._unavailabilities[node]
+                print "Removed node %s from buckets as it was unavailable" % node
+                print self.buckets
+            except ValueError:
+                pass
+
+
 
     def _find_closest_bucket(self, starting_bucket_idx, target_node, n=20):
         shift = 0
@@ -79,6 +97,20 @@ class TableTestCase(unittest.TestCase):
         self.assertEqual(result, sorted([
             ((search_node ^ n).distance_key(), n) for n in nodes
         ]))
+
+    def test_mark_as_not_seen(self):
+        target = Node(random_32bytes())
+        table = RoutingTable(self.node)
+        table.update(target)
+
+        for _ in xrange(RoutingTable.N_RETRIES-1):
+            table.mark_as_unavailable(target)
+            self.assertEqual(len(table.find_closest(target)), 1)
+            self.assertTrue(table._unavailabilities[target] > 0)
+
+        table.mark_as_unavailable(target)
+        self.assertEqual(table._unavailabilities[target], 0)
+
 
 
 if __name__ == '__main__':
