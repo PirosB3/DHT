@@ -4,6 +4,7 @@ import sys
 import json
 import zmq
 from itertools import count
+from flask import Flask
 
 import threading
 from node import Node, random_32bytes
@@ -11,32 +12,31 @@ from table import RoutingTable
 
 import hashlib
 
+c = zmq.Context()
+ports = count(3000)
+app = Flask(__name__)
+kads = []
+
 def distributed_hash(key):
     return bytearray(hashlib.md5(key).hexdigest())
 
 
 class DHT(object):
-    def __init__(self, node, bootstrap=None):
+    def __init__(self, node, bootstrap=None, context=None):
         self.data = {}
         self.bootstrap = bootstrap
         self.node = node
         self.routing_table = RoutingTable(node, bootstrap)
-        self.context = zmq.Context()
-        self._sockets = {}
+        self.context = context if context != None else zmq.Context()
         self._thread_uid = None
-
-    @property
-    def started(self):
-        return self._thread_uid != None
 
     def get_value_handler(self, data_key, key, sock):
         try:
             sock.send(json.dumps({
-                'result': 'OK',
                 'value': self.data[data_key]
             }))
         except KeyError:
-            print "GET_VALUE for %s failed. Trying nearest" % data_key
+            print "%s: GET_VALUE for %s failed. Trying nearest" % (self.node, data_key)
             self.find_node_handler(key, sock)
 
     def store_value_handler(self, key, value, sock):
@@ -55,11 +55,8 @@ class DHT(object):
         }))
 
     def send_message_to_node(self, node, message_type, message_value=None):
-        try:
-            socket = self._sockets[tuple(node.data)]
-        except KeyError:
-            socket = self.context.socket(zmq.REQ)
-            socket.connect("tcp://%s:%s" % (node.host, node.port))
+        socket = self.context.socket(zmq.REQ)
+        socket.connect("tcp://%s:%s" % (node.host, node.port))
 
         socket.send(json.dumps({
             'from': {
@@ -109,8 +106,8 @@ class DHT(object):
                     new_nodes = result['nodes']
                 else:
                     new_nodes = self.send_message_to_node(node, 'FIND_NODE', tuple(key.data))['nodes']
-                for data, host, port in new_nodes:
 
+                for data, host, port in new_nodes:
                     new_node = Node(bytearray(data), host, port)
                     if new_node == self.node:
                         continue
@@ -208,10 +205,35 @@ def slave(uid):
     dht.run()
 
 
+@app.route('/<int:id>/data')
+def get_data(id):
+    return json.dumps(kads[id].data)
+
+@app.route('/<int:id>/<key>')
+def get_key(id, key):
+    return json.dumps({
+        'data': kads[id][key]
+    })
+
+@app.route('/<int:id>/<key>/<value>')
+def set_key(id, key, value):
+    kads[id][key] = value
+    return 200, ""
+
+@app.route('/create')
+def create():
+    node = Node(random_32bytes(), port=next(ports))
+    import ipdb; ipdb.set_trace()
+    seed = random.choice(kads).node
+    dht = DHT(node, seed, context=c)
+    kads.append(dht)
+    processes.append(dht.run())
+    return json.dumps({
+        'n': len(processes)-1
+    })
+
 if __name__ == '__main__':
-    ports = count(3000)
     processes = []
-    kads = []
     n_processes = int(sys.argv[1])
     for _ in xrange(n_processes):
         try:
@@ -219,13 +241,15 @@ if __name__ == '__main__':
         except IndexError:
             seed = None
 
+        print "STARTED"
         node = Node(random_32bytes(), port=next(ports))
-        dht = DHT(node, seed)
+        dht = DHT(node, seed, context=c)
         kads.append(dht)
 
         processes.append(dht.run())
 
     from time import sleep
+    n_failures = 0
     with open('lipsum.txt') as f:
         result = re.findall("[A-Z]{2,}(?![a-z])|[A-Z][a-z]+(?=[A-Z])|[\'\w\-]+", f.read())
         sleep(1)
@@ -235,6 +259,10 @@ if __name__ == '__main__':
         sleep(1)
         for idx in xrange(1, len(result)):
             first, second = result[idx-1], result[idx]
-            print "%s -> %s" % (first, random.choice(kads)[first])
-
-    [p.join() for p in processes]
+            try:
+                print "%s -> %s" % (first, random.choice(kads)[first])
+            except KeyError:
+                n_failures += 1
+    print "Failed %s times" % n_failures
+    
+    app.run()
