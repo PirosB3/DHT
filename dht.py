@@ -1,21 +1,13 @@
-import re
 import random
 import sys
 import json
 import zmq
-from itertools import count
-from flask import Flask
 
 import threading
 from node import Node, random_32bytes
 from table import RoutingTable
 
 import hashlib
-
-c = zmq.Context()
-ports = count(3000)
-app = Flask(__name__)
-kads = []
 
 
 class SocketTimedOutError(Exception):
@@ -230,73 +222,3 @@ def slave(uid):
     bootstrap = Node(bytearray(uid), port=3000)
     dht = DHT(node, bootstrap)
     dht.run()
-
-
-@app.route('/<int:id>/data')
-def get_data(id):
-    return json.dumps(kads[id].data)
-
-@app.route('/<int:id>/<key>')
-def get_key(id, key):
-    return json.dumps({
-        'data': kads[id][key]
-    })
-
-@app.route('/<int:id>/<key>/<value>')
-def set_key(id, key, value):
-    kads[id][key] = value
-    return 200, ""
-
-@app.route('/kill/<int:n>')
-def kill(n):
-    for k in kads[n:]:
-        k.shutdown()
-
-    del kads[n:]
-
-@app.route('/create')
-def create():
-    node = Node(random_32bytes(), port=next(ports))
-    import ipdb; ipdb.set_trace()
-    seed = random.choice(kads).node
-    dht = DHT(node, seed, context=c)
-    kads.append(dht)
-    processes.append(dht.run())
-    return json.dumps({
-        'n': len(processes)-1
-    })
-
-if __name__ == '__main__':
-    processes = []
-    n_processes = int(sys.argv[1])
-    for _ in xrange(n_processes):
-        try:
-            seed = random.choice(kads).node
-        except IndexError:
-            seed = None
-
-        print "STARTED"
-        node = Node(random_32bytes(), port=next(ports))
-        dht = DHT(node, seed, context=c)
-        kads.append(dht)
-
-        processes.append(dht.run())
-
-    from time import sleep
-    n_failures = 0
-    with open('lipsum.txt') as f:
-        result = re.findall("[A-Z]{2,}(?![a-z])|[A-Z][a-z]+(?=[A-Z])|[\'\w\-]+", f.read())
-        sleep(1)
-        for idx in xrange(1, len(result)):
-            first, second = result[idx-1], result[idx]
-            random.choice(kads)[first] = second
-        sleep(1)
-        for idx in xrange(1, len(result)):
-            first, second = result[idx-1], result[idx]
-            try:
-                print "%s -> %s" % (first, random.choice(kads)[first])
-            except KeyError:
-                n_failures += 1
-    print "Failed %s times" % n_failures
-    
-    app.run()
